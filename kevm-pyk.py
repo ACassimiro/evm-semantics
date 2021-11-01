@@ -49,10 +49,6 @@ def removeGeneratedCells(constrainedTerm):
            )
     return rewriteAnywhereWith(rule, constrainedTerm)
 
-def makeDefinition(sents, specModuleName, requireNames, moduleNames):
-    module = KFlatModule(specModuleName, moduleNames, sents)
-    return KDefinition(specModuleName, [module], requires = [KRequire(name.split('/')[-1]) for name in requireNames])
-
 def isAnonVariable(kast):
     return isKVariable(kast) and kast['name'].startswith('_')
 
@@ -242,6 +238,7 @@ class KSummarize(KProve):
         self.buildInfeasible = buildInfeasible
         self.isTerminal      = isTerminal
         self.sanitizeConfig  = sanitizeConfig
+        self.cfgFile         = self.useDirectory + '/cfg'
 
     def writeStateToFile(self, stateId, state, descriptor = None):
         stateFileName = self.useDirectory + '/state-' + str(stateId)
@@ -294,6 +291,152 @@ class KSummarize(KProve):
             newStatesAndConstraints.append((ns, newConstraint))
 
         return (depth, newStatesAndConstraints)
+
+    def writeCFG(self, cfg):
+        with open(self.cfgFile + '.json', 'w') as cFile:
+            cFile.write(json.dumps(cfg))
+            cFile.flush()
+            _notif('Wrote CFG: ' + self.cfgFile + '.json')
+
+    def readCFG(self):
+        with open(self.cfgFile + '.json', 'r') as cFile:
+            cfg = json.loads(cFile.read())
+            for k in list(cfg['graph'].keys()):
+                cfg['graph'][int(k)] = cfg['graph'][k]
+                cfg['graph'].pop(k)
+            for k in list(cfg['states'].keys()):
+                cfg['states'][int(k)] = cfg['states'][k]
+                cfg['states'].pop(k)
+            return cfg
+
+    def prettyPrintCFGEdges(self, cfg, initStateId, indent = ''):
+        cfgLines = []
+        if initStateId not in cfg['graph']:
+            if initStateId in cfg['stuck']:
+                cfgLines.append(indent + 'STUCK')
+            if initStateId in cfg['terminal']:
+                cfgLines.append(indent + 'TERMINAL')
+            if initStateId in cfg['frontier']:
+                cfgLines.append(indent + 'FRONTIER')
+        if initStateId in cfg['graph']:
+            for (i, edge) in enumerate(cfg['graph'][initStateId]):
+                (finalStateId, label, depth) = (edge['successor'], self.prettyPrintConstraint(edge['constraint']), edge['depth'])
+                edgeHeader    = '|---- ' + str(finalStateId) + ' [' + '{0:>5}'.format(depth) + ' steps]'
+                edgeSpacer    = '|' + (' ' * (len(edgeHeader) - 1))
+                labelHead     = label.split('\n')[0]
+                labelBody     = label.split('\n')[1:]
+                noNextState   = False
+                if finalStateId <= initStateId:
+                    edgeHeader = edgeHeader + ' [SUBSUMED ' + str(finalStateId) + ']'
+                    noNextState = True
+                if finalStateId in cfg['stuck']:
+                    edgeHeader = edgeHeader + ' [STUCK]'
+                    noNextState = True
+                if finalStateId in cfg['terminal']:
+                    edgeHeader = edgeHeader + ' [TERMINAL]'
+                    noNextState = True
+                if finalStateId in cfg['frontier']:
+                    edgeHeader = edgeHeader + ' [FRONTIER]'
+                    noNextState = True
+                if 'accountUpdate' in edge:
+                    labelBody.extend(self.prettyPrint(edge['accountUpdate']).split('\n'))
+                cfgLines.append( indent + edgeHeader + ': ' + labelHead)
+                cfgLines.extend([indent + edgeSpacer + ': ' + lb for lb in labelBody])
+                newIndent = indent
+                if i == len(cfg['graph'][initStateId]) - 1:
+                    newIndent = newIndent + '  '
+                else:
+                    newIndent = newIndent + '| '
+                if not noNextState:
+                    cfgLines.extend(self.prettyPrintCFGEdges(cfg, finalStateId, indent = newIndent))
+        return cfgLines
+
+    def prettyPrintCFG(self, cfg):
+        states = list(cfg['states'].keys())
+        cfgLines = [ '// CFG:'
+                   , '//     states:   ' + ', '.join([str(s) for s in states])
+                   , '//     init:     ' + ', '.join([str(s) for s in cfg['init']])
+                   , '//     terminal: ' + ', '.join([str(s) for s in cfg['terminal']])
+                   , '//     frontier: ' + ', '.join([str(s) for s in cfg['frontier']])
+                   , '//     stuck:    ' + ', '.join([str(s) for s in cfg['stuck']])
+                   , '//     graph:'
+                   ]
+        for initStateId in cfg['init']:
+            cfgLines.extend([ '//             ' + l for l in self.prettyPrintCFGEdges(cfg, initStateId) ])
+        return '\n'.join(cfgLines)
+
+    def writeCFGGraphviz(self, cfg):
+        outputFile = self.useDirectory + '/cfg'
+        states     = list(cfg['states'].keys())
+        graph      = Digraph()
+        for s in states:
+            labels = [str(s) + ':']
+            for l in ['init', 'terminal', 'frontier', 'stuck']:
+                if s in cfg[l]:
+                    labels.append(l)
+            label = ' '.join(labels)
+            graph.node(str(s), label = label)
+        for s in cfg['graph'].keys():
+            for edge in cfg['graph'][s]:
+                (f, id, d) = (edge['successor'], self.prettyPrintConstraint(edge['constraint']), edge['depth'])
+                label = id
+                if d != 1:
+                    label = label + ': ' + str(d) + ' steps'
+                if 'accountUpdate' in edge:
+                    label = label + '\n  ' + '\n  '.join(self.prettyPrint(edge['accountUpdate']).split('\n'))
+                graph.edge(str(s), str(f), label = '  ' + label + '        ')
+        graph.render(outputFile)
+        _notif('Wrote graphviz rendering of CFG: ' + outputFile + '.pdf')
+
+    def writeCFGClaimsFile(self, cfg, moduleName, rules = False):
+        outputFile = self.useDirectory + ('/basic-blocks-spec.k' if not rules else '/basic-blocks.k')
+        with open(outputFile, 'w') as intermediate:
+            newClaims       = [c[2] for c in cfg['newClaims' if not rules else 'newRules']]
+            claimModule     = KFlatModule(moduleName, [self.mainModule], newClaims)
+            claimDefinition = KDefinition(moduleName, [claimModule], requires = [KRequire(self.mainFileName)])
+            intermediate.write(_genFileTimestamp() + '\n')
+            intermediate.write(self.prettyPrint(claimDefinition) + '\n\n')
+            intermediate.write(self.prettyPrintCFG(cfg) + '\n')
+            intermediate.flush()
+            _notif('Wrote updated ' + ('claims' if not rules else 'rules') + ' file: ' + outputFile)
+
+    def transitiveClosureFromState(self, cfg, stateId):
+        states    = []
+        newStates = [stateId]
+        while len(newStates) > 0:
+            state = newStates.pop(0)
+            if state not in states:
+                states.append(state)
+                if state in cfg['graph']:
+                    newStates.extend([edge['successor'] for edge in cfg['graph'][state]])
+        return states
+
+    def invalidateCFGAfterState(self, cfg, stateId):
+        invalidNodes = self.transitiveClosureFromState(cfg, stateId)
+        invalidNodes.pop(0)
+        newCfg                = { 'newClaims'   : [ (initId, finalId, claim) for (initId, finalId, claim) in cfg['newClaims'] if initId not in invalidNodes and finalId not in invalidNodes ]
+                                , 'newRules'    : [ (initId, finalId, claim) for (initId, finalId, claim) in cfg['newRules']  if initId not in invalidNodes and finalId not in invalidNodes ]
+                                , 'states'      : { i: cfg['states'][i] for i in cfg['states']     if i not in invalidNodes }
+                                , 'seenStates'  : [ i                   for i in cfg['seenStates'] if i not in invalidNodes ]
+                                , 'init'        : [ i                   for i in cfg['init']       if i not in invalidNodes ]
+                                , 'frontier'    : [ i                   for i in cfg['frontier']   if i not in invalidNodes ]
+                                , 'terminal'    : [ i                   for i in cfg['terminal']   if i not in invalidNodes ]
+                                , 'stuck'       : [ i                   for i in cfg['stuck']      if i not in invalidNodes ]
+                                , 'graph'       : {}
+                                , 'nextStateId' : 0
+                                }
+        newCfg['nextStateId'] = max(cfg['states'].keys()) + 1
+        newFrontier           = []
+        for init in cfg['graph']:
+            if init not in invalidNodes:
+                newCfg['graph'][init] = []
+                for edge in cfg['graph'][init]:
+                    if edge['successor'] not in invalidNodes:
+                        newCfg['graph'][init].append(edge)
+                    else:
+                        newFrontier.append(init)
+        newCfg['frontier'] = sorted(list(set(newCfg['frontier'] + newFrontier)))
+        return newCfg
 
 ### KEVM Stuff
 
@@ -506,153 +649,6 @@ def kevmBuildInfeasible(constrainedTerm):
     subst['STATUSCODE_CELL'] = KConstant('.StatusCode_NETWORK_StatusCode')
     return substitute(config, subst)
 
-### Summarization Utilities
-
-def writeCFGToFile(cfg, fileName):
-    with open(fileName, 'w') as cFile:
-        cFile.write(json.dumps(cfg))
-        cFile.flush()
-        _notif('Wrote updated cfg file: ' + fileName)
-
-def readCFGFromFile(fileName):
-    with open(fileName, 'r') as cFile:
-        cfg = json.loads(cFile.read())
-        for k in list(cfg['graph'].keys()):
-            cfg['graph'][int(k)] = cfg['graph'][k]
-            cfg['graph'].pop(k)
-        for k in list(cfg['states'].keys()):
-            cfg['states'][int(k)] = cfg['states'][k]
-            cfg['states'].pop(k)
-        return cfg
-
-def writeCFGEdgesPretty(cfg, summarize, initStateId, indent = ''):
-    cfgLines = []
-    if initStateId not in cfg['graph']:
-        if initStateId in cfg['stuck']:
-            cfgLines.append(indent + 'STUCK')
-        if initStateId in cfg['terminal']:
-            cfgLines.append(indent + 'TERMINAL')
-        if initStateId in cfg['frontier']:
-            cfgLines.append(indent + 'FRONTIER')
-    if initStateId in cfg['graph']:
-        for (i, edge) in enumerate(cfg['graph'][initStateId]):
-            (finalStateId, label, depth) = (edge['successor'], summarize.prettyPrintConstraint(edge['constraint']), edge['depth'])
-            edgeHeader    = '|---- ' + str(finalStateId) + ' [' + '{0:>5}'.format(depth) + ' steps]'
-            edgeSpacer    = '|' + (' ' * (len(edgeHeader) - 1))
-            labelHead     = label.split('\n')[0]
-            labelBody     = label.split('\n')[1:]
-            noNextState   = False
-            if finalStateId <= initStateId:
-                edgeHeader = edgeHeader + ' [SUBSUMED ' + str(finalStateId) + ']'
-                noNextState = True
-            if finalStateId in cfg['stuck']:
-                edgeHeader = edgeHeader + ' [STUCK]'
-                noNextState = True
-            if finalStateId in cfg['terminal']:
-                edgeHeader = edgeHeader + ' [TERMINAL]'
-                noNextState = True
-            if finalStateId in cfg['frontier']:
-                edgeHeader = edgeHeader + ' [FRONTIER]'
-                noNextState = True
-            if 'accountUpdate' in edge:
-                labelBody.extend(summarize.prettyPrint(edge['accountUpdate']).split('\n'))
-            cfgLines.append( indent + edgeHeader + ': ' + labelHead)
-            cfgLines.extend([indent + edgeSpacer + ': ' + lb for lb in labelBody])
-            newIndent = indent
-            if i == len(cfg['graph'][initStateId]) - 1:
-                newIndent = newIndent + '  '
-            else:
-                newIndent = newIndent + '| '
-            if not noNextState:
-                cfgLines.extend(writeCFGEdgesPretty(cfg, summarize, finalStateId, indent = newIndent))
-    return cfgLines
-
-def writeCFGPretty(cfg, summarize):
-    states = list(cfg['states'].keys())
-    cfgLines = [ '// CFG:'
-               , '//     states:   ' + ', '.join([str(s) for s in states])
-               , '//     init:     ' + ', '.join([str(s) for s in cfg['init']])
-               , '//     terminal: ' + ', '.join([str(s) for s in cfg['terminal']])
-               , '//     frontier: ' + ', '.join([str(s) for s in cfg['frontier']])
-               , '//     stuck:    ' + ', '.join([str(s) for s in cfg['stuck']])
-               , '//     graph:'
-               ]
-    for initStateId in cfg['init']:
-        cfgLines.extend([ '//             ' + l for l in writeCFGEdgesPretty(cfg, summarize, initStateId) ])
-    return '\n'.join(cfgLines)
-
-def writeCFGGraphviz(cfg, summarize):
-    outputFile = summarize.useDirectory + '/cfg'
-    states     = list(cfg['states'].keys())
-    graph      = Digraph()
-    for s in states:
-        labels = [str(s) + ':']
-        for l in ['init', 'terminal', 'frontier', 'stuck']:
-            if s in cfg[l]:
-                labels.append(l)
-        label = ' '.join(labels)
-        graph.node(str(s), label = label)
-    for s in cfg['graph'].keys():
-        for edge in cfg['graph'][s]:
-            (f, id, d) = (edge['successor'], summarize.prettyPrintConstraint(edge['constraint']), edge['depth'])
-            label = id
-            if d != 1:
-                label = label + ': ' + str(d) + ' steps'
-            if 'accountUpdate' in edge:
-                label = label + '\n  ' + '\n  '.join(summarize.prettyPrint(edge['accountUpdate']).split('\n'))
-            graph.edge(str(s), str(f), label = '  ' + label + '        ')
-    graph.render(outputFile)
-    _notif('Wrote graphviz rendering of CFG: ' + outputFile + '.pdf')
-
-def writeCFGClaimsFile(cfg, summarize, moduleName, rules = False):
-    outputFile = summarize.useDirectory + ('/basic-blocks-spec.k' if not rules else '/basic-blocks.k')
-    with open(outputFile, 'w') as intermediate:
-        newClaims       = [c[2] for c in cfg['newClaims' if not rules else 'newRules']]
-        claimDefinition = makeDefinition(newClaims, moduleName, ['edsl.md'], ['EDSL'])
-        intermediate.write(_genFileTimestamp() + '\n')
-        intermediate.write(summarize.prettyPrint(claimDefinition) + '\n\n')
-        intermediate.write(writeCFGPretty(cfg, summarize) + '\n')
-        intermediate.flush()
-        _notif('Wrote updated ' + ('claims' if not rules else 'rules') + ' file: ' + outputFile)
-
-def transitiveClosureFromState(cfg, stateId):
-    states    = []
-    newStates = [stateId]
-    while len(newStates) > 0:
-        state = newStates.pop(0)
-        if state not in states:
-            states.append(state)
-            if state in cfg['graph']:
-                newStates.extend([edge['successor'] for edge in cfg['graph'][state]])
-    return states
-
-def invalidateCFGAfterState(cfg, stateId):
-    invalidNodes = transitiveClosureFromState(cfg, stateId)
-    invalidNodes.pop(0)
-    newCfg                = { 'newClaims'   : [ (initId, finalId, claim) for (initId, finalId, claim) in cfg['newClaims'] if initId not in invalidNodes and finalId not in invalidNodes ]
-                            , 'newRules'    : [ (initId, finalId, claim) for (initId, finalId, claim) in cfg['newRules']  if initId not in invalidNodes and finalId not in invalidNodes ]
-                            , 'states'      : { i: cfg['states'][i] for i in cfg['states']     if i not in invalidNodes }
-                            , 'seenStates'  : [ i                   for i in cfg['seenStates'] if i not in invalidNodes ]
-                            , 'init'        : [ i                   for i in cfg['init']       if i not in invalidNodes ]
-                            , 'frontier'    : [ i                   for i in cfg['frontier']   if i not in invalidNodes ]
-                            , 'terminal'    : [ i                   for i in cfg['terminal']   if i not in invalidNodes ]
-                            , 'stuck'       : [ i                   for i in cfg['stuck']      if i not in invalidNodes ]
-                            , 'graph'       : {}
-                            , 'nextStateId' : 0
-                            }
-    newCfg['nextStateId'] = max(cfg['states'].keys()) + 1
-    newFrontier           = []
-    for init in cfg['graph']:
-        if init not in invalidNodes:
-            newCfg['graph'][init] = []
-            for edge in cfg['graph'][init]:
-                if edge['successor'] not in invalidNodes:
-                    newCfg['graph'][init].append(edge)
-                else:
-                    newFrontier.append(init)
-    newCfg['frontier'] = sorted(list(set(newCfg['frontier'] + newFrontier)))
-    return newCfg
-
 ### KEVM Summarizer
 
 def buildInitState(contractName, constrainedTerm):
@@ -695,8 +691,7 @@ def kevmSummarize( kevm
                  ):
 
     claimsModule = contractName.upper() + '-BASIC-BLOCKS-SPEC'
-    cfgFile      = kevm.useDirectory + '/cfg.json'
-    cfg          = readCFGFromFile(cfgFile)
+    cfg          = kevm.readCFG()
 
     while len(cfg['frontier']) > 0 and (maxBlocks is None or len(cfg['newClaims']) < maxBlocks):
         initStateId                  = cfg['frontier'].pop(0)
@@ -749,9 +744,9 @@ def kevmSummarize( kevm
                 if finalStateId not in cfg['terminal']:
                     cfg['frontier'].append(finalStateId)
 
-        writeCFGToFile(cfg, cfgFile)
-        writeCFGGraphviz(cfg, kevm)
-        writeCFGClaimsFile(cfg, kevm, claimsModule)
+        kevm.writeCFG(cfg)
+        kevm.writeCFGGraphviz()
+        kevm.writeCFGClaimsFile(claimsModule)
 
     return cfg
 
@@ -776,7 +771,6 @@ def kevmPykMain(args, kompiled_dir):
         directory          = '/'.join(mainFileName.split('/')[0:-1])
         contractName       = args['contract-name']
         summaryDir         = args['summary-dir'] + '/' + contractName.lower()
-        cfgFile            = summaryDir + '/cfg.json'
         summaryRulesModule = contractName.upper() + '-BASIC-BLOCKS'
         maxBlocks          = None if 'max_blocks' not in args else args['max_blocks']
         resumeFromState    = None if 'max_blocks' not in args else args['resume_from_state']
@@ -800,19 +794,19 @@ def kevmPykMain(args, kompiled_dir):
                          , 'nextStateId' : len(initStates)
                          }
         else:
-            initCfg = readCFGFromFile(cfgFile)
+            initCfg = kevm.readCFG()
             if 0 <= resumeFromState:
-                initCfg = invalidateCFGAfterState(initCfg, resumeFromState)
+                initCfg = kevm.invalidateCFGAfterState(initCfg, resumeFromState)
                 if resumeFromState not in initCfg['frontier']:
                     _fatal('Pruning CFG failed! Is state ' + str(resumeFromState) + ' in a cycle?')
-        writeCFGToFile(initCfg, cfgFile)
-        writeCFGGraphviz(initCfg, kevm)
-        writeCFGClaimsFile(initCfg, kevm, summaryRulesModule + '-SPEC')
+        kevm.writeCFG(initCfg)
+        kevm.writeCFGGraphviz(initCfg)
+        kevm.writeCFGClaimsFile(initCfg, summaryRulesModule + '-SPEC')
 
         kevmSummarize(kevm, contractName, summaryDir, verify = args['verify'], maxBlocks = maxBlocks)
 
-        cfg = readCFGFromFile(cfgFile)
-        writeCFGClaimsFile(cfg, kevm, summaryRulesModule, rules = True)
+        cfg = kevm.readCFG()
+        kevm.writeCFGClaimsFile(cfg, summaryRulesModule, rules = True)
         with open(kevm.useDirectory + '/basic-blocks.k', 'r') as cFile:
             args['output'].write(cFile.read())
             args['output'].flush()
