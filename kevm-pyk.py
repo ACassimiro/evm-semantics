@@ -400,6 +400,14 @@ class KSummarize(KProve):
             intermediate.flush()
             _notif('Wrote updated ' + ('claims' if not rules else 'rules') + ' file: ' + outputFile)
 
+    def insertCFGNode(self, cfg, newState):
+        newStateId                = cfg['nextStateId']
+        cfg['nextStateId']        = cfg['nextStateId'] + 1
+        cfg['states'][newStateId] = newState
+        cfg['graph'][newStateId]  = []
+        self.writeStateToFile(newStateId, newState)
+        return (cfg, newStateId)
+
     def transitiveClosureFromState(self, cfg, stateId):
         states    = []
         newStates = [stateId]
@@ -705,10 +713,7 @@ def kevmSummarize( kevm
         claimId                           = 'GEN-' + str(initStateId) + '-TO-MAX' + str(maxDepth)
         (depth, nextStatesAndConstraints) = kevm.getBasicBlocks(initState, claimId, maxDepth = maxDepth)
         for (i, (finalState, newConstraint)) in enumerate(nextStatesAndConstraints):
-            finalStateId                = cfg['nextStateId']
-            cfg['nextStateId']          = cfg['nextStateId'] + 1
-            cfg['states'][finalStateId] = finalState
-            kevm.writeStateToFile(finalStateId, finalState)
+            (cfg, finalStateId) = kevm.insertCFGNode(cfg, finalState)
 
             subsumed = False
             cfg['graph'][initStateId].append(kevmTransitionLabel(finalStateId, initState, finalState, newConstraint, depth))
@@ -721,8 +726,6 @@ def kevmSummarize( kevm
                     seen = cfg['states'][j]
                     if subsumes(seen, finalState):
                         subsumed = True
-                        if finalStateId not in cfg['graph']:
-                            cfg['graph'][finalStateId] = []
                         cfg['graph'][finalStateId].append(kevmTransitionLabel(j, finalState, seen, newConstraint, 0))
 
             (initState, finalState) = kevmMakeExecutable(initState, finalState)
