@@ -408,6 +408,21 @@ class KSummarize(KProve):
         self.writeStateToFile(newStateId, newState)
         return (cfg, newStateId)
 
+    def insertCFGEdge(self, cfg, initStateId, label, newState, depth, subsumed = False, terminal = False, stuck = False):
+        if initStateId not in cfg['graph']:
+            cfg['graph'][initStateId] = []
+        (cfg, newStateId)  = self.insertCFGEdge(self, cfg, newState)
+        label['successor'] = newStateId
+        label['depth']     = depth
+        cfg['graph'][initStateId].append(label)
+        if stuck:
+            cfg['stuck'].append(newStateId)
+        elif terminal:
+            cfg['terminal'].append(newStateId)
+        elif not subsumed:
+            cfg['frontier'].append(newStateId)
+        return cfg
+
     def transitiveClosureFromState(self, cfg, stateId):
         states    = []
         newStates = [stateId]
@@ -679,8 +694,8 @@ def buildInitState(contractName, constrainedTerm):
                   ]
     return buildAssoc(KConstant('#Top'), '#And', [applyCellSubst(constrainedTerm, cellSubst)] + constraints)
 
-def kevmTransitionLabel(successor, initConstrainedTerm, finalConstrainedTerm, newConstraint, depth):
-    label = { 'successor': successor, 'constraint': newConstraint, 'depth': depth }
+def kevmTransitionLabel(initConstrainedTerm, finalConstrainedTerm, newConstraint):
+    label = { 'constraint': newConstraint }
     initAccounts  = getCell(initConstrainedTerm,  'ACCOUNTS_CELL')
     finalAccounts = getCell(finalConstrainedTerm, 'ACCOUNTS_CELL')
     if initAccounts != finalAccounts:
@@ -706,8 +721,6 @@ def kevmSummarize( kevm
         initState                    = abstract(cfg['states'][initStateId])
         (initConfig, initConstraint) = splitConfigAndConstraints(initState)
         initConstraints              = flattenLabel('#And', initConstraint)
-        if initStateId not in cfg['graph']:
-            cfg['graph'][initStateId] = []
         cfg['seenStates'].append(initStateId)
         kevm.writeStateToFile(initStateId, initState, descriptor = 'abstract')
         claimId                           = 'GEN-' + str(initStateId) + '-TO-MAX' + str(maxDepth)
@@ -715,18 +728,16 @@ def kevmSummarize( kevm
         for (i, (finalState, newConstraint)) in enumerate(nextStatesAndConstraints):
             (cfg, finalStateId) = kevm.insertCFGNode(cfg, finalState)
 
+            terminal = kevmIsTerminal(finalState)
+            stuck    = (not terminal) and len(nextStatesAndConstraints) == 1 and depth != maxDepth
             subsumed = False
-            cfg['graph'][initStateId].append(kevmTransitionLabel(finalStateId, initState, finalState, newConstraint, depth))
-            if kevmIsTerminal(finalState):
-                cfg['terminal'].append(finalStateId)
-            elif len(nextStatesAndConstraints) == 1 and depth != maxDepth:
-                cfg['stuck'].append(finalStateId)
-            else:
-                for j in cfg['seenStates']:
-                    seen = cfg['states'][j]
-                    if subsumes(seen, finalState):
-                        subsumed = True
-                        cfg['graph'][finalStateId].append(kevmTransitionLabel(j, finalState, seen, newConstraint, 0))
+            for j in cfg['seenStates']:
+                seen = cfg['states'][j]
+                if subsumes(seen, finalState):
+                    subsumed = True
+            edgeLabel = kevmTransitionLabel(initState, finalState, newConstraint)
+            cfg       = kevm.insertCFGEdge(cfg, initStateId, edgeLabel, finalState, depth, subsumed = subsumed, terminal = terminal, stuck = stuck)
+            cfg['graph'][finalStateId].append(kevmTransitionLabel(j, finalState, seen, newConstraint, 0))
 
             (initState, finalState) = kevmMakeExecutable(initState, finalState)
             basicBlockId = contractName.upper() + '-BASIC-BLOCK-' + str(initStateId) + '-TO-' + str(finalStateId)
