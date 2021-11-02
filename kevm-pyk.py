@@ -340,7 +340,8 @@ class KSummarize(KProve):
                     noNextState = True
                 if 'accountUpdate' in edge:
                     labelBody.extend(self.prettyPrint(edge['accountUpdate']).split('\n'))
-                cfgLines.append( indent + edgeHeader + ': ' + labelHead)
+                cfgLines.append( indent + edgeSpacer )
+                cfgLines.append( indent + edgeHeader + ': ' + labelHead )
                 cfgLines.extend([indent + edgeSpacer + ': ' + lb for lb in labelBody])
                 newIndent = indent
                 if i == len(cfg['graph'][initStateId]) - 1:
@@ -409,19 +410,18 @@ class KSummarize(KProve):
         self.writeStateToFile(newStateId, newState)
         return (cfg, newStateId)
 
-    def insertCFGEdge(self, cfg, initStateId, label, newState, depth, subsumed = False, terminal = False, stuck = False):
+    def insertCFGEdge(self, cfg, initStateId, label, finalStateId, finalState, depth, subsumed = False, terminal = False, stuck = False):
         if initStateId not in cfg['graph']:
             cfg['graph'][initStateId] = []
-        (cfg, newStateId)  = self.insertCFGNode(cfg, newState)
-        label['successor'] = newStateId
+        label['successor'] = finalStateId
         label['depth']     = depth
         cfg['graph'][initStateId].append(label)
         if stuck:
-            cfg['stuck'].append(newStateId)
+            cfg['stuck'].append(finalStateId)
         elif terminal:
-            cfg['terminal'].append(newStateId)
+            cfg['terminal'].append(finalStateId)
         elif not subsumed:
-            cfg['frontier'].append(newStateId)
+            cfg['frontier'].append(finalStateId)
         return cfg
 
     def transitiveClosureFromState(self, cfg, stateId):
@@ -738,9 +738,9 @@ def kevmSummarize( kevm
                 if subsumes(seen, finalState):
                     subsumed      = True
                     subsumedLabel = kevmTransitionLabel(finalState, seen, newConstraint)
-                    cfg           = kevm.insertCFGEdge(cfg, finalStateId, subsumedLabel, j, 0, subsumed = True)
+                    cfg           = kevm.insertCFGEdge(cfg, finalStateId, subsumedLabel, j, seen, 0, subsumed = True)
             edgeLabel = kevmTransitionLabel(initState, finalState, newConstraint)
-            cfg       = kevm.insertCFGEdge(cfg, initStateId, edgeLabel, finalState, depth, subsumed = subsumed, terminal = terminal, stuck = stuck)
+            cfg       = kevm.insertCFGEdge(cfg, initStateId, edgeLabel, finalStateId, finalState, depth, subsumed = subsumed, terminal = terminal, stuck = stuck)
 
             basicBlockId = contractName.upper() + '-BASIC-BLOCK-' + str(initStateId) + '-TO-' + str(finalStateId)
             newClaim     = buildRule(basicBlockId, initState, finalState, claim = True)
