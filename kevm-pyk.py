@@ -321,7 +321,7 @@ class KSummarize(KProve):
         if initStateId in cfg['graph']:
             for (i, edge) in enumerate(cfg['graph'][initStateId]):
                 (finalStateId, label, depth) = (edge['successor'], self.prettyPrintConstraint(edge['constraint']), edge['depth'])
-                edgeHeader    = '|---- ' + str(finalStateId) + ' [' + '{0:>5}'.format(depth) + ' steps]'
+                edgeHeader    = '|--' + '{0:>3}'.format(finalStateId) + ' [' + '{0:>4}'.format(depth) + ' steps]'
                 edgeSpacer    = '|' + (' ' * (len(edgeHeader) - 1))
                 labelHead     = label.split('\n')[0]
                 labelBody     = label.split('\n')[1:]
@@ -344,9 +344,9 @@ class KSummarize(KProve):
                 cfgLines.extend([indent + edgeSpacer + ': ' + lb for lb in labelBody])
                 newIndent = indent
                 if i == len(cfg['graph'][initStateId]) - 1:
-                    newIndent = newIndent + '  '
+                    newIndent = newIndent + '     '
                 else:
-                    newIndent = newIndent + '| '
+                    newIndent = newIndent + '|    '
                 if not noNextState:
                     cfgLines.extend(self.prettyPrintCFGEdges(cfg, finalStateId, indent = newIndent))
         return cfgLines
@@ -362,6 +362,7 @@ class KSummarize(KProve):
                    , '//     graph:'
                    ]
         for initStateId in cfg['init']:
+            cfgLines.append(  '//             ' + str(initStateId) )
             cfgLines.extend([ '//             ' + l for l in self.prettyPrintCFGEdges(cfg, initStateId) ])
         return '\n'.join(cfgLines)
 
