@@ -449,7 +449,6 @@ class KSummarize(KProve):
         newCfg                = { 'newClaims'   : [ (initId, finalId, claim) for (initId, finalId, claim) in cfg['newClaims'] if initId not in invalidNodes and finalId not in invalidNodes ]
                                 , 'newRules'    : [ (initId, finalId, claim) for (initId, finalId, claim) in cfg['newRules']  if initId not in invalidNodes and finalId not in invalidNodes ]
                                 , 'states'      : { i: cfg['states'][i] for i in cfg['states']     if i not in invalidNodes }
-                                , 'seenStates'  : [ i                   for i in cfg['seenStates'] if i not in invalidNodes ]
                                 , 'init'        : [ i                   for i in cfg['init']       if i not in invalidNodes ]
                                 , 'frontier'    : [ i                   for i in cfg['frontier']   if i not in invalidNodes ]
                                 , 'terminal'    : [ i                   for i in cfg['terminal']   if i not in invalidNodes ]
@@ -726,43 +725,48 @@ def kevmSummarize( kevm
     cfg          = kevm.readCFG()
 
     while len(cfg['frontier']) > 0 and (maxBlocks is None or len(cfg['newClaims']) < maxBlocks):
-        initStateId                  = cfg['frontier'].pop(0)
-        initState                    = abstract(cfg['states'][initStateId])
-        (initConfig, initConstraint) = splitConfigAndConstraints(initState)
-        initConstraints              = flattenLabel('#And', initConstraint)
-        cfg['seenStates'].append(initStateId)
-        kevm.writeStateToFile(initStateId, initState, descriptor = 'abstract')
-        claimId                           = 'GEN-' + str(initStateId) + '-TO-MAX' + str(maxDepth)
-        (depth, nextStatesAndConstraints) = kevm.getBasicBlocks(initState, claimId, maxDepth = maxDepth)
-        for (i, (finalState, newConstraint)) in enumerate(nextStatesAndConstraints):
-            (initState, finalState) = kevmMakeExecutable(initState, finalState)
-            (cfg, finalStateId)     = kevm.insertCFGNode(cfg, finalState)
+        initStateId = cfg['frontier'].pop(0)
+        initState   = cfg['states'][initStateId]
 
-            terminal = kevmIsTerminal(finalState)
-            stuck    = (not terminal) and len(nextStatesAndConstraints) == 1 and depth != maxDepth
-            subsumed = False
-            for j in cfg['seenStates']:
-                seen = cfg['states'][j]
-                if subsumes(seen, finalState):
+        subsumed = False
+        for sid in cfg['states']:
+            if sid < initStateId:
+                state = cfg['states'][sid]
+                if subsumes(state, initState):
+                    subsumedLabel = kevmTransitionLabel(initState, state, boolToken(True))
+                    cfg           = kevm.insertCFGEdge(cfg, initStateId, subsumedLabel, sid, state, 0, subsumed = True)
                     subsumed      = True
-                    subsumedLabel = kevmTransitionLabel(finalState, seen, newConstraint)
-                    cfg           = kevm.insertCFGEdge(cfg, finalStateId, subsumedLabel, j, seen, 0, subsumed = True)
-            edgeLabel = kevmTransitionLabel(initState, finalState, newConstraint)
-            cfg       = kevm.insertCFGEdge(cfg, initStateId, edgeLabel, finalStateId, finalState, depth, subsumed = subsumed, terminal = terminal, stuck = stuck)
+                    break
 
-            basicBlockId = 'BASIC-BLOCK-' + str(initStateId) + '-TO-' + str(finalStateId)
-            newClaim     = buildRule(basicBlockId, initState, finalState, claim = True)
-            cfg['newClaims'].append((initStateId, finalStateId, newClaim))
+        if not subsumed:
+            initState                         = abstract(initState)
+            (initConfig, initConstraint)      = splitConfigAndConstraints(initState)
+            initConstraints                   = flattenLabel('#And', initConstraint)
+            claimId                           = 'GEN-' + str(initStateId) + '-TO-MAX' + str(maxDepth)
+            (depth, nextStatesAndConstraints) = kevm.getBasicBlocks(initState, claimId, maxDepth = maxDepth)
+            kevm.writeStateToFile(initStateId, initState, descriptor = 'abstract')
+            for (i, (finalState, newConstraint)) in enumerate(nextStatesAndConstraints):
+                (initState, finalState) = kevmMakeExecutable(initState, finalState)
+                (cfg, finalStateId)     = kevm.insertCFGNode(cfg, finalState)
 
-            kevm.writeClaimDefinition(newClaim, basicBlockId)
-            if verify:
-                provenState = kevm.proveClaim(newClaim, basicBlockId)
-                if provenState == KConstant('#Top'):
-                    _notif('Verified claim: ' + basicBlockId)
-                    newRule = buildRule(basicBlockId, initState, finalState, claim = False, priority = 35)
-                    cfg['newRules'].append((initStateId, finalStateId, newRule))
-                else:
-                    _warning('Could not verify claim: ' + basicBlockId)
+                terminal  = kevmIsTerminal(finalState)
+                stuck     = (not terminal) and len(nextStatesAndConstraints) == 1 and depth != maxDepth
+                edgeLabel = kevmTransitionLabel(initState, finalState, newConstraint)
+                cfg       = kevm.insertCFGEdge(cfg, initStateId, edgeLabel, finalStateId, finalState, depth, terminal = terminal, stuck = stuck)
+
+                basicBlockId = 'BASIC-BLOCK-' + str(initStateId) + '-TO-' + str(finalStateId)
+                newClaim     = buildRule(basicBlockId, initState, finalState, claim = True)
+                cfg['newClaims'].append((initStateId, finalStateId, newClaim))
+
+                kevm.writeClaimDefinition(newClaim, basicBlockId)
+                if verify:
+                    provenState = kevm.proveClaim(newClaim, basicBlockId)
+                    if provenState == KConstant('#Top'):
+                        _notif('Verified claim: ' + basicBlockId)
+                        newRule = buildRule(basicBlockId, initState, finalState, claim = False, priority = 35)
+                        cfg['newRules'].append((initStateId, finalStateId, newRule))
+                    else:
+                        _warning('Could not verify claim: ' + basicBlockId)
 
         kevm.writeCFG(cfg)
         kevm.writeCFGGraphviz(cfg)
@@ -802,8 +806,7 @@ def kevmPykMain(args, kompiled_dir):
 
         if resumeFromState is None:
             initStates = [ kevmSanitizeConfig(s) for s in flattenLabel('#Or', buildInitState(contractName, json.loads(args['init-term'].read())['term'])) ]
-            initCfg    = { 'seenStates'  : []
-                         , 'newClaims'   : []
+            initCfg    = { 'newClaims'   : []
                          , 'newRules'    : []
                          , 'graph'       : {}
                          , 'init'        : [ i    for (i, _) in enumerate(initStates) ]
