@@ -318,14 +318,14 @@ class KSummarize(KProve):
                 cfgLines.append(indent + 'TERMINAL')
             if initStateId in cfg['frontier']:
                 cfgLines.append(indent + 'FRONTIER')
-        if initStateId in cfg['graph']:
+        else:
             for (i, edge) in enumerate(cfg['graph'][initStateId]):
                 (finalStateId, label, depth) = (edge['successor'], self.prettyPrintConstraint(edge['constraint']), edge['depth'])
                 edgeHeader    = '|--' + '{0:>3}'.format(finalStateId) + ' [' + '{0:>4}'.format(depth) + ' steps]'
-                edgeSpacer    = '|' + (' ' * (len(edgeHeader) - 1))
                 labelHead     = label.split('\n')[0]
                 labelBody     = label.split('\n')[1:]
                 noNextState   = False
+                finalBranch   = i == len(cfg['graph'][initStateId]) - 1
                 if finalStateId <= initStateId:
                     edgeHeader = edgeHeader + ' [SUBSUMED ' + str(finalStateId) + ']'
                     noNextState = True
@@ -340,11 +340,15 @@ class KSummarize(KProve):
                     noNextState = True
                 if 'accountUpdate' in edge:
                     labelBody.extend(self.prettyPrint(edge['accountUpdate']).split('\n'))
-                cfgLines.append( indent + edgeSpacer )
+                edgeSpacer = ''
+                edgeSpacer = edgeSpacer + ('     ' if finalBranch else '|    ')
+                edgeSpacer = edgeSpacer + (' '     if noNextState else '|')
+                edgeSpacer = edgeSpacer + (' ' * (len(edgeHeader) - len(edgeSpacer)))
+                cfgLines.append( indent + '|' + (' ' * (len(edgeSpacer) - 1)) )
                 cfgLines.append( indent + edgeHeader + ': ' + labelHead )
                 cfgLines.extend([indent + edgeSpacer + ': ' + lb for lb in labelBody])
                 newIndent = indent
-                if i == len(cfg['graph'][initStateId]) - 1:
+                if finalBranch:
                     newIndent = newIndent + '     '
                 else:
                     newIndent = newIndent + '|    '
