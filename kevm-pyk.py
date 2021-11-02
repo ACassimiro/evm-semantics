@@ -221,7 +221,7 @@ class KProve(KPrint):
             _fatal('Proof took zero steps, likely the LHS is invalid: ' + tmpClaim)
         return finalState
 
-    def proveClaim(self, claim, claimId, args = [], haskellArgs = [], logAxiomsFile = None):
+    def writeClaimDefinition(self, claim, claimId):
         tmpClaim      = self.useDirectory + '/' + claimId.lower() + '-spec.k'
         tmpModuleName = claimId.upper() + '-SPEC'
         with open(tmpClaim, 'w') as tc:
@@ -230,7 +230,11 @@ class KProve(KPrint):
             tc.write(_genFileTimestamp() + '\n')
             tc.write(self.prettyPrint(claimDefinition) + '\n\n')
             tc.flush()
-        return self.prove(tmpClaim, tmpModuleName, args = args, haskellArgs = haskellArgs, logAxiomsFile = logAxiomsFile)
+        _notif('Wrote claim file: ' + tmpClaim)
+
+    def proveClaim(self, claim, claimId, args = [], haskellArgs = [], logAxiomsFile = None):
+        self.writeClaimDefinition(claim, claimId)
+        return self.prove(self.useDirectory + '/' + claimId.lower() + '-spec.k', claimId.upper() + '-SPEC', args = args, haskellArgs = haskellArgs, logAxiomsFile = logAxiomsFile)
 
 class KSummarize(KProve):
     def __init__(self, kompiledDirectory, mainFileName, buildInfeasible, isTerminal, sanitizeConfig, useDirectory = None):
@@ -746,10 +750,11 @@ def kevmSummarize( kevm
             edgeLabel = kevmTransitionLabel(initState, finalState, newConstraint)
             cfg       = kevm.insertCFGEdge(cfg, initStateId, edgeLabel, finalStateId, finalState, depth, subsumed = subsumed, terminal = terminal, stuck = stuck)
 
-            basicBlockId = contractName.upper() + '-BASIC-BLOCK-' + str(initStateId) + '-TO-' + str(finalStateId)
+            basicBlockId = 'BASIC-BLOCK-' + str(initStateId) + '-TO-' + str(finalStateId)
             newClaim     = buildRule(basicBlockId, initState, finalState, claim = True)
             cfg['newClaims'].append((initStateId, finalStateId, newClaim))
 
+            kevm.writeClaimDefinition(newClaim, basicBlockId)
             if verify:
                 provenState = kevm.proveClaim(newClaim, basicBlockId)
                 if provenState == KConstant('#Top'):
