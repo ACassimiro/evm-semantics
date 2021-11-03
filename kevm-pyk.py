@@ -371,6 +371,7 @@ class KSummarize(KProve):
                    , '//     graph:'
                    ]
         for initStateId in cfg['init']:
+            cfgLines.append(  '//'                                 )
             cfgLines.append(  '//             ' + str(initStateId) )
             cfgLines.extend([ '//             ' + l for l in self.prettyPrintCFGEdges(cfg, initStateId) ])
         return '\n'.join(cfgLines)
@@ -409,6 +410,18 @@ class KSummarize(KProve):
             intermediate.write(self.prettyPrintCFG(cfg) + '\n')
             intermediate.flush()
             _notif('Wrote updated ' + ('claims' if not rules else 'rules') + ' file: ' + outputFile)
+
+    def emptyCFG(self):
+        return { 'newClaims'   : []
+               , 'newRules'    : []
+               , 'graph'       : {}
+               , 'init'        : []
+               , 'frontier'    : []
+               , 'states'      : {}
+               , 'terminal'    : []
+               , 'stuck'       : []
+               , 'nextStateId' : 0
+               }
 
     def insertCFGNode(self, cfg, newState):
         newStateId                = cfg['nextStateId']
@@ -478,14 +491,17 @@ ltInt                 = lambda i1, i2:  KApply('_<Int_', [i1, i2])
 leInt                 = lambda i1, i2:  KApply('_<=Int_', [i1, i2])
 rangeUInt256          = lambda i:       KApply('#rangeUInt(_,_)_EVM-TYPES_Bool_Int_Int', [intToken(256), i])
 rangeAddress          = lambda i:       KApply('#rangeAddress(_)_EVM-TYPES_Bool_Int', [i])
+rangeBool             = lambda i:       KApply('#rangeBool(_)_EVM-TYPES_Bool_Int', [i])
 sizeByteArray         = lambda ba:      KApply('#sizeByteArray(_)_EVM-TYPES_Int_ByteArray', [ba])
 infGas                = lambda g:       KApply('infGas', [g])
 computeValidJumpDests = lambda p:       KApply('#computeValidJumpDests(_)_EVM_Set_ByteArray', [p])
 binRuntime            = lambda c:       KApply('#binRuntime', [c])
-mlEqualsTrue          = lambda b:       KApply('#Equals', [boolToken(True), b])
+mlEquals              = lambda a1, a2:  KApply('#Equals', [a1, a2])
+mlEqualsTrue          = lambda b:       mlEquals(boolToken(True), b)
 abiCallData           = lambda n, args: KApply('#abiCallData', [stringToken(n)] + args)
-abiAddress            = lambda a:       KApply('#address(_)_EVM-ABI_TypedArg_Int', [KVariable(a)])
-abiUInt256            = lambda i:       KApply('#uint256(_)_EVM-ABI_TypedArg_Int', [KVariable(i)])
+abiAddress            = lambda a:       KApply('#address(_)_EVM-ABI_TypedArg_Int', [a])
+abiUInt256            = lambda i:       KApply('#uint256(_)_EVM-ABI_TypedArg_Int', [i])
+abiBool               = lambda b:       KApply('#bool(_)_EVM-ABI_TypedArg_Int', [b])
 bytesAppend           = lambda b1, b2:  KApply('_++__EVM-TYPES_ByteArray_ByteArray_ByteArray', [b1, b2])
 
 def kevmAccountCell(id, balance, code, storage, origStorage, nonce):
@@ -499,6 +515,7 @@ def kevmAccountCell(id, balance, code, storage, origStorage, nonce):
                  )
 
 def kevmSymbolTable(symbolTable):
+    symbolTable['_orBool_']                                                  = paren(symbolTable['_orBool_'])
     symbolTable['_Set_']                                                     = paren(symbolTable['_Set_'])
     symbolTable['_AccountCellMap_']                                          = paren(lambda a1, a2: a1 + '\n' + a2)
     symbolTable['AccountCellMapItem']                                        = lambda k, v: v
@@ -660,12 +677,13 @@ def loopAbstract(constrainedTerm):
     return newConstrainedTerm
 
 def subsumes(constrainedTerm1, constrainedTerm2):
-    # Could implement this with the search-final-state-matching check used for LLVM backend? Does it work with constraints?
-    if all([getCell(constrainedTerm1, cn) == getCell(constrainedTerm2, cn) for cn in ['PC_CELL', 'K_CELL']]):
-        wordStack1 = getCell(constrainedTerm1, 'WORDSTACK_CELL')
-        wordStack2 = getCell(constrainedTerm2, 'WORDSTACK_CELL')
-        if match(wordStack1, wordStack2) is not None:
-            return True
+    (state1, constraint1) = splitConfigAndConstraints(constrainedTerm1)
+    (state2, constraint2) = splitConfigAndConstraints(constrainedTerm2)
+    constraints1          = flattenLabel('#And', constraint1)
+    constraints2          = flattenLabel('#And', constraint2)
+    subst                 = match(state1, state2)
+    if subst is not None:
+        return all([substitute(c1, subst) in constraints2 for c1 in constraints1])
     return False
 
 def kevmIsTerminal(constrainedTerm):
@@ -687,7 +705,6 @@ def buildInitState(contractName, constrainedTerm):
     cellSubst   = { 'K_CELL'         : KSequence([KConstant('#execute_EVM_KItem'), ktokenDots])
                   , 'ID_CELL'        : KVariable('ACCT_ID')
                   , 'CALLER_CELL'    : KVariable('CALLER_ID')
-                  , 'CALLDATA_CELL'  : KVariable('CALLDATA_CELL')
                   , 'GAS_CELL'       : infGas(KVariable('_GAS_CELL'))
                   , 'PC_CELL'        : KToken('0', 'Int')
                   , 'WORDSTACK_CELL' : KConstant('.WordStack_EVM-TYPES_WordStack')
@@ -698,7 +715,6 @@ def buildInitState(contractName, constrainedTerm):
                   , mlEqualsTrue(rangeAddress(KVariable('CALLER_ID')))
                   , mlEqualsTrue(rangeUInt256(KVariable('ACCT_BALANCE')))
                   , mlEqualsTrue(rangeUInt256(KVariable('ACCT_NONCE')))
-                  , mlEqualsTrue(ltInt(sizeByteArray(KVariable('CALLDATA_CELL')), intToken(2 ** 256)))
                   ]
     return buildAssoc(KConstant('#Top'), '#And', [applyCellSubst(constrainedTerm, cellSubst)] + constraints)
 
@@ -712,6 +728,33 @@ def kevmTransitionLabel(initConstrainedTerm, finalConstrainedTerm, newConstraint
         accountUpdate = collapseDots(accountUpdate)
         label['accountUpdate'] = accountUpdate
     return label
+
+def kevmAbiEncodeSignature(fName, fDescription):
+    fArgs                = fDescription['args']
+    fProperties          = fDescription['properties']
+    callDataArgs         = []
+    callDataConstraints  = []
+    callValueConstraints = []
+    for fArg in fArgs:
+        argVar = KVariable(fName.upper() + '_' + fArg['name'].upper())
+        if fArg['type'] == 'address':
+            callDataArgs.append(abiAddress(argVar))
+            callDataConstraints.append(mlEqualsTrue(rangeAddress(argVar)))
+        elif fArg['type'] == 'uint256':
+            callDataArgs.append(abiUInt256(argVar))
+            callDataConstraints.append(mlEqualsTrue(rangeUInt256(argVar)))
+        elif fArg['type'] == 'bool':
+            callDataArgs.append(abiBool(argVar))
+            callDataConstraints.append(mlEqualsTrue(rangeBool(argVar)))
+        else:
+            _fatal('Do not know how to abi encode type: ' + fArg['type'])
+    callDataCell  = bytesAppend(abiCallData(fName, callDataArgs), KVariable('CALLDATA_REST'))
+    callValueCell = KVariable('CALLVALUE_CELL')
+
+    callDataConstraints.append(rangeUInt256(sizeByteArray(callDataCell)))
+    if 'payable' not in fProperties:
+        callValueConstraints.append(mlEquals(callValueCell, intToken(0)))
+    return (callDataCell, callDataConstraints, callValueCell, callValueConstraints)
 
 def kevmSummarize( kevm
                  , contractName
@@ -777,15 +820,16 @@ def kevmSummarize( kevm
 ### Main Functionality
 
 summarizeArgs = pykCommandParsers.add_parser('summarize', help = 'Given a disjunction of states, build the true halting spec for each state.')
-summarizeArgs.add_argument('init-term' , type = argparse.FileType('r'), help = 'JSON representation of initial state.')
-summarizeArgs.add_argument('contract-name' , type = str, help = 'Name of contract to summarize.')
-summarizeArgs.add_argument('main-module-file' , type = str, help = 'Name of main verification file.')
-summarizeArgs.add_argument('summary-dir' , type = str, help = 'Where to store summarized output.')
+summarizeArgs.add_argument('init-term', type = argparse.FileType('r'), help = 'JSON representation of initial state.')
+summarizeArgs.add_argument('contract-name', type = str, help = 'Name of contract to summarize.')
+summarizeArgs.add_argument('main-module-file', type = str, help = 'Name of main verification file.')
+summarizeArgs.add_argument('summary-dir', type = str, help = 'Where to store summarized output.')
 summarizeArgs.add_argument('-n', '--max-blocks', type = int, nargs = '?', help = 'Maximum number of basic block summarize to generate.')
 summarizeArgs.add_argument('--resume-from-state', type = int, nargs = '?', help = 'Start from saved state file in summarization directory.')
 summarizeArgs.add_argument('--verify', default = True, action = 'store_true', help = 'Prove generated claims before outputting them.')
 summarizeArgs.add_argument('--no-verify', dest = 'verify', action = 'store_false', help = 'Do not prove generated claims before outputting them.')
 summarizeArgs.add_argument('-o', '--output', type = argparse.FileType('w'), default = '-')
+summarizeArgs.add_argument('--abi', type = argparse.FileType('r'), help = 'ABI signature of contract to summarize.')
 
 def kevmPykMain(args, kompiled_dir):
 
@@ -805,17 +849,25 @@ def kevmPykMain(args, kompiled_dir):
         kevm.proverArgs  = [ '--provex' , '--boundary-cells' , 'k,pc' ]
 
         if resumeFromState is None:
-            initStates = [ kevmSanitizeConfig(s) for s in flattenLabel('#Or', buildInitState(contractName, json.loads(args['init-term'].read())['term'])) ]
-            initCfg    = { 'newClaims'   : []
-                         , 'newRules'    : []
-                         , 'graph'       : {}
-                         , 'init'        : [ i    for (i, _) in enumerate(initStates) ]
-                         , 'frontier'    : [ i    for (i, _) in enumerate(initStates) ]
-                         , 'states'      : { i: s for (i, s) in enumerate(initStates) }
-                         , 'terminal'    : []
-                         , 'stuck'       : []
-                         , 'nextStateId' : len(initStates)
-                         }
+            initConstrainedTerms = [ kevmSanitizeConfig(s) for s in flattenLabel('#Or', buildInitState(contractName, json.loads(args['init-term'].read())['term'])) ]
+            if 'abi' in args and args['abi'] is not None:
+                abiData             = json.loads(args['abi'].read())
+                callDatas           = [ kevmAbiEncodeSignature(name, abiData[name]) for name in abiData ]
+                newConstrainedTerms = []
+                for constrainedTerm in initConstrainedTerms:
+                    (state, constraint) = splitConfigAndConstraints(constrainedTerm)
+                    constraints         = flattenLabel('#And', constraint)
+                    for (callData, callDataConstraints, callValue, callValueConstraints) in callDatas:
+                        newState           = setCell(state,    'CALLDATA_CELL',  callData)
+                        newState           = setCell(newState, 'CALLVALUE_CELL', callValue)
+                        newConstrainedTerm = buildAssoc(KConstant('#Top'), '#And', [newState] + constraints + callDataConstraints + callValueConstraints)
+                        newConstrainedTerms.append(newConstrainedTerm)
+                initConstrainedTerms = newConstrainedTerms
+            initCfg = kevm.emptyCFG()
+            for constrainedTerm in initConstrainedTerms:
+                (initCfg, stateId) = kevm.insertCFGNode(initCfg, constrainedTerm)
+                initCfg['frontier'].append(stateId)
+                initCfg['init'].append(stateId)
         else:
             initCfg = kevm.readCFG()
             if 0 <= resumeFromState:
