@@ -751,7 +751,7 @@ def kevmAbiEncodeSignature(fName, fDescription):
     callDataCell  = bytesAppend(abiCallData(fName, callDataArgs), KVariable('CALLDATA_REST'))
     callValueCell = KVariable('CALLVALUE_CELL')
 
-    callDataConstraints.append(rangeUInt256(sizeByteArray(callDataCell)))
+    callDataConstraints.append(leInt(sizeByteArray(callDataCell), KToken('maxUInt128', 'Int')))
     if 'payable' not in fProperties:
         callValueConstraints.append(mlEquals(callValueCell, intToken(0)))
     return (callDataCell, callDataConstraints, callValueCell, callValueConstraints)
